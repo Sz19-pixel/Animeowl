@@ -19,7 +19,7 @@
   "dependencies": {
     "stremio-addon-sdk": "^1.6.6",
     "axios": "^1.6.0",
-    "cheerio": "^1.0.0-rc.12"
+    "jsdom": "^23.0.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"

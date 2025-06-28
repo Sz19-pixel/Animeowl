@@ -1,6 +1,6 @@
 const { addonBuilder } = require('stremio-addon-sdk');
 const axios = require('axios');
-const cheerio = require('cheerio');
+const { JSDOM } = require('jsdom');
 
 // Addon manifest - defines what the addon provides
 const manifest = {
@@ -47,7 +47,7 @@ const BASE_URL = 'https://animeowl.me';
 // Helper function to create axios instance with proper headers
 const createAxiosInstance = () => {
     return axios.create({
-        timeout: 10000,
+        timeout: 15000,
         headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -60,23 +60,34 @@ const createAxiosInstance = () => {
     });
 };
 
-// Convert HTML element to search result format
-function parseSearchResult($, element) {
-    const $el = $(element);
-    const title = $el.find('a.post-thumb img').attr('alt') || '';
-    const href = $el.find('a.post-thumb').attr('href') || '';
-    const posterUrl = $el.find('a.post-thumb img').attr('data-src') || $el.find('a.post-thumb img').attr('src') || '';
-    
-    // Extract ID from href for Stremio format
-    const id = href.replace(BASE_URL, '').replace('/anime/', '');
-    
-    return {
-        id: `animeowl:${id}`,
-        type: 'series',
-        name: title,
-        poster: posterUrl.startsWith('http') ? posterUrl : BASE_URL + posterUrl,
-        description: title
-    };
+// Parse HTML using JSDOM instead of Cheerio
+function parseSearchResult(html, element) {
+    try {
+        const img = element.querySelector('a.post-thumb img');
+        const link = element.querySelector('a.post-thumb');
+        
+        if (!img || !link) return null;
+        
+        const title = img.getAttribute('alt') || '';
+        const href = link.getAttribute('href') || '';
+        const posterUrl = img.getAttribute('data-src') || img.getAttribute('src') || '';
+        
+        // Extract ID from href for Stremio format
+        const id = href.replace(BASE_URL, '').replace('/anime/', '');
+        
+        if (!id || !title) return null;
+        
+        return {
+            id: `animeowl:${id}`,
+            type: 'series',
+            name: title,
+            poster: posterUrl.startsWith('http') ? posterUrl : BASE_URL + posterUrl,
+            description: title
+        };
+    } catch (err) {
+        console.log('Error parsing search result:', err.message);
+        return null;
+    }
 }
 
 // Catalog handler - provides content discovery
@@ -107,13 +118,16 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
         }
         
         const response = await api.get(`${BASE_URL}/${endpoint}?page=${page}`);
-        const $ = cheerio.load(response.data);
+        const dom = new JSDOM(response.data);
+        const document = dom.window.document;
         
         const metas = [];
-        $('div.recent-anime').each((i, element) => {
+        const elements = document.querySelectorAll('div.recent-anime');
+        
+        elements.forEach(element => {
             try {
-                const meta = parseSearchResult($, element);
-                if (meta.id && meta.name) {
+                const meta = parseSearchResult(response.data, element);
+                if (meta && meta.id && meta.name) {
                     metas.push(meta);
                 }
             } catch (err) {
@@ -137,8 +151,6 @@ function extractJwtFromScript(scriptContent) {
 
 // Simplified JavaScript deobfuscation (basic string replacements)
 function simpleDeobfuscate(code) {
-    // This is a simplified version - the original uses QuickJS with Synchrony
-    // For a production addon, you'd need a more robust solution
     return code
         .replace(/\s+/g, ' ')
         .replace(/\/\*.*?\*\//g, '')
@@ -151,12 +163,17 @@ async function extractStreamingLinks(url, referer = BASE_URL) {
     const streams = [];
     
     try {
+        console.log('Extracting streams from:', url);
+        
         // Get the main page content
         const response = await api.get(url);
-        const $ = cheerio.load(response.data);
+        const dom = new JSDOM(response.data);
+        const document = dom.window.document;
         
         // Look for data-source attribute (contains video server info)
-        const dataSrc = $('#hot-anime-tab').attr('data-source');
+        const hotTab = document.querySelector('#hot-anime-tab');
+        const dataSrc = hotTab?.getAttribute('data-source');
+        
         if (!dataSrc) {
             console.log('No data-source found');
             return streams;
@@ -193,7 +210,7 @@ async function extractStreamingLinks(url, referer = BASE_URL) {
             const kaidoUrl = servers.kaido[0].url + jwt;
             streams.push({
                 name: 'AnimeOwl Kaido',
-                title: 'Kaido Server',
+                title: 'Kaido Server (HD)',
                 url: kaidoUrl,
                 behaviorHints: {
                     bingeGroup: 'animeowl-kaido'
@@ -226,7 +243,7 @@ async function extractStreamingLinks(url, referer = BASE_URL) {
                 if (zoroData.url) {
                     streams.push({
                         name: 'AnimeOwl Zoro',
-                        title: 'Zoro Server',
+                        title: 'Zoro Server (SUB)',
                         url: zoroData.url,
                         subtitles: zoroData.subtitle ? [
                             {
@@ -266,32 +283,37 @@ builder.defineStreamHandler(async ({ type, id }) => {
         // Get anime page to find episodes/movie links
         const animeUrl = `${BASE_URL}/anime/${animeSlug}`;
         const response = await api.get(animeUrl);
-        const $ = cheerio.load(response.data);
+        const dom = new JSDOM(response.data);
+        const document = dom.window.document;
         
         const streams = [];
         
         // Check if it's a TV series or movie
-        const typeElement = $('div.type.d-flex a').text().trim();
-        const isMovie = typeElement !== 'TV';
+        const typeElement = document.querySelector('div.type.d-flex a');
+        const typeText = typeElement?.textContent?.trim() || '';
+        const isMovie = typeText !== 'TV';
         
         if (isMovie) {
             // For movies, get direct episode links
             const movieLinks = [];
-            $('a.episode-node').each((i, element) => {
-                const href = $(element).attr('href');
+            const episodeNodes = document.querySelectorAll('a.episode-node');
+            episodeNodes.forEach(node => {
+                const href = node.getAttribute('href');
                 if (href) movieLinks.push(href);
             });
             
             // Extract streams from movie links
-            for (const link of movieLinks) {
+            for (const link of movieLinks.slice(0, 3)) { // Limit to first 3 to avoid timeout
                 const movieStreams = await extractStreamingLinks(link);
                 streams.push(...movieStreams);
+                if (streams.length > 0) break; // Stop after finding working streams
             }
         } else {
             // For TV series, get first available episode
-            // In a full implementation, you'd handle season/episode selection
-            const firstEpisode = $('#anime-cover-sub-content .episode-node a').first().attr('href') ||
-                               $('#anime-cover-dub-content .episode-node a').first().attr('href');
+            const subEpisode = document.querySelector('#anime-cover-sub-content .episode-node a');
+            const dubEpisode = document.querySelector('#anime-cover-dub-content .episode-node a');
+            
+            const firstEpisode = subEpisode?.getAttribute('href') || dubEpisode?.getAttribute('href');
             
             if (firstEpisode) {
                 const episodeStreams = await extractStreamingLinks(firstEpisode);
@@ -299,6 +321,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
             }
         }
         
+        console.log(`Found ${streams.length} streams for ${id}`);
         return { streams };
         
     } catch (error) {

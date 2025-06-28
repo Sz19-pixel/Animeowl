@@ -277,4 +277,8 @@ builder.defineStreamHandler(async ({ type, id }) => {
     }
 });
 
-module.exports = builder.getInterface();
+// Export for Vercel serverless
+const addonInterface = builder.getInterface();
+
+// Export the Express app directly for Vercel
+module.exports = addonInterface;
